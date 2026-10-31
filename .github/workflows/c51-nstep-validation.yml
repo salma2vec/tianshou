@@ -1,0 +1,64 @@
+name: C51 n-step validation
+on:
+  push:
+    branches: [codex/validate-c51-nstep-20261031]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: '3.11'
+            torch: '2.6.0'
+          - python: '3.12'
+            torch: '2.9.1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install torch==${{ matrix.torch }} --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install -e . pytest scipy networkx 'ruff==0.14.1' mypy
+      - name: Record source and dependencies
+        run: |
+          mkdir -p validation
+          git rev-parse HEAD > validation/head.txt
+          python -m pip freeze > validation/dependencies.txt
+          sha256sum tianshou/algorithm/modelfree/c51.py test/base/test_c51_targets.py > validation/source.sha256
+      - name: Baseline regression
+        shell: bash
+        run: |
+          git fetch origin f2402056b03acafeedf2518a5088db55add004ab
+          cp tianshou/algorithm/modelfree/c51.py validation/fixed-c51.py
+          git show f2402056b03acafeedf2518a5088db55add004ab:tianshou/algorithm/modelfree/c51.py > tianshou/algorithm/modelfree/c51.py
+          set +e
+          python -m pytest test/base/test_c51_targets.py -q --junitxml=validation/before.xml > validation/before.log 2>&1
+          status=$?
+          set -e
+          cp validation/fixed-c51.py tianshou/algorithm/modelfree/c51.py
+          cat validation/before.log
+          test "$status" -eq 1
+          python - <<'PY'
+          import xml.etree.ElementTree as E
+          root = E.parse('validation/before.xml').getroot()
+          assert not root.findall('.//error')
+          assert len(root.findall('.//failure')) > 0
+          PY
+      - name: Fixed regressions and native suites
+        run: python -m pytest test/base/test_c51_targets.py test/base/test_returns.py test/base/test_buffer.py test/base/test_policy.py -q --junitxml=validation/after.xml
+      - name: Lint and format
+        run: |
+          ruff check tianshou/algorithm/modelfree/c51.py test/base/test_c51_targets.py
+          ruff format --check tianshou/algorithm/modelfree/c51.py test/base/test_c51_targets.py
+      - name: Type check changed files
+        run: mypy --follow-imports=silent tianshou/algorithm/modelfree/c51.py test/base/test_c51_targets.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: c51-validation-py${{ matrix.python }}-torch${{ matrix.torch }}
+          path: validation
